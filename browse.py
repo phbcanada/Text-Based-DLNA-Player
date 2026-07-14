@@ -1,7 +1,7 @@
 import socket
 import requests
 import xml.etree.ElementTree as ET
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import re
 import html
 import threading
@@ -16,6 +16,13 @@ class DLNARenderer:
         self.desc_url = None
         self.control_url = None
         self.friendly_name = "None"
+
+    @property
+    def host(self):
+        """Extracts and returns the hostname or IP address of the renderer."""
+        if self.desc_url:
+            return urlparse(self.desc_url).hostname
+        return "Unknown"
 
     @staticmethod
     def discover_renderers(timeout=3):
@@ -124,6 +131,10 @@ class DLNARenderer:
         if not self.control_url:
             return False
 
+        # Commented out verbose tracking output to keep monitor UI clean
+        # print(f"\n[*] Sending track to {self.friendly_name}...")
+        # print(f"    Title: {title}")
+
         # Escape characters inside the metadata DIDL block
         safe_title = html.escape(title)
         safe_uri = html.escape(uri)
@@ -169,6 +180,7 @@ class DLNARenderer:
             r2.raise_for_status()
             return True
         except Exception as e:
+            # Keep log of errors only
             print(f" [!] Playback action failed: {e}")
             return False
 
@@ -221,6 +233,51 @@ class DLNARenderer:
             pass
         return "UNKNOWN"
 
+    def get_position_info(self):
+        """Queries the renderer for current track duration, position, and metadata."""
+        if not self.control_url:
+            return {"title": "None", "duration": "00:00:00", "position": "00:00:00"}
+        
+        soap = f"""<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="{self.NS_SOAP}">
+  <s:Body>
+    <u:GetPositionInfo xmlns:u="{self.NS_AVT}">
+      <InstanceID>0</InstanceID>
+    </u:GetPositionInfo>
+  </s:Body>
+</s:Envelope>"""
+        
+        headers = {
+            "Content-Type": 'text/xml; charset="utf-8"',
+            "SOAPACTION": f'"{self.NS_AVT}#GetPositionInfo"',
+            "Connection": "close"
+        }
+        
+        try:
+            r = requests.post(self.control_url, data=soap, headers=headers, timeout=2)
+            r.raise_for_status()
+            root = ET.fromstring(r.content)
+            
+            duration = root.find(".//TrackDuration").text or "00:00:00"
+            position = root.find(".//RelTime").text or "00:00:00"
+            
+            # Extract title if present inside TrackMetaData XML string
+            title = "Unknown"
+            meta_xml = root.find(".//TrackMetaData").text
+            if meta_xml and meta_xml != "NOT_IMPLEMENTED":
+                try:
+                    meta_root = ET.fromstring(meta_xml)
+                    ns = {'dc': 'http://purl.org/dc/elements/1.1/'}
+                    title_node = meta_root.find(".//dc:title", ns)
+                    if title_node is not None:
+                        title = title_node.text
+                except Exception:
+                    pass
+                    
+            return {"title": title, "duration": duration, "position": position}
+        except Exception:
+            return {"title": "None", "duration": "00:00:00", "position": "00:00:00"}
+
     def _send_command(self, action, soap_payload):
         headers = {
             "Content-Type": 'text/xml; charset="utf-8"',
@@ -258,7 +315,6 @@ class PlayQueue:
 
     def play_now(self, track_item):
         with self.lock:
-            # Insert item right after current or as the sole starting element
             insert_pos = self.current_idx + 1 if self.current_idx != -1 else 0
             self.queue.insert(insert_pos, track_item)
             self.current_idx = insert_pos
@@ -327,9 +383,7 @@ class PlayQueue:
         if 0 <= self.current_idx < len(self.queue):
             track = self.queue[self.current_idx]
             self.was_playing = False  # Reset state before starting new track
-            success = self.renderer.play_uri(track['uri'], track['title'])
-            if success:
-                print(f"\n[➔] Now Playing: {track['title']}")
+            self.renderer.play_uri(track['uri'], track['title'])
 
     def _monitor_loop(self):
         """Background thread loop verifying track status every second."""
@@ -341,11 +395,10 @@ class PlayQueue:
                     if state in ("PLAYING", "TRANSITIONING"):
                         self.was_playing = True
                     elif state in ("STOPPED", "NO_MEDIA_PRESENT", "PAUSED_PLAYBACK"):
-                        # If it was actively playing, and is now suddenly stopped/none -> track finished!
                         if self.was_playing and state != "PAUSED_PLAYBACK":
                             self.was_playing = False
                             self.next()
-            except Exception as e:
+            except Exception:
                 pass
             time.sleep(1.5)
 
@@ -476,11 +529,10 @@ class DLNABrowser:
                 print("Please enter a valid integer.")
 
     def browse_directory(self, object_id, force_refresh=False):
-        # Check cache first
+        """Sends SOAP Browse request and extracts directory listing (with caching)."""
         if not force_refresh and object_id in self.cache:
             return self.cache[object_id]
 
-        """Sends SOAP Browse request and extracts directory listing."""
         soap_envelope = f"""<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="{self.NS_SOAP}" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
   <s:Body>
@@ -616,18 +668,7 @@ class DLNABrowser:
                     self.current_title = item_data['title']
                     
                 elif item_type == 'file':
-                    print(f"\nSelect action for '{item_data['title']}':")
-                    print("  1. Play Now")
-                    print("  2. Add to Queue")
-                    print("  3. Cancel")
-                    action_choice = input("Choice: ").strip()
-                    
-                    if action_choice == '1':
-                        play_queue.play_now(item_data)
-                    elif action_choice == '2':
-                        play_queue.add_to_queue(item_data)
-                    else:
-                        print("Cancelled.")
+                    play_queue.add_to_queue(item_data)
 
             except (ValueError, IndexError):
                 print("\n[!] Invalid option. Please try again.")
@@ -639,34 +680,93 @@ class Controller:
         self.queue = queue
         self.browser = browser
 
+    def print_help(self):
+        """Displays available interactive commands."""
+        print("\n" + "🎧" * 25)
+        print(f" ACTIVE OUTPUT: {self.queue.renderer.friendly_name} ({self.queue.renderer.host})")
+        print(" " + "•" * 48)
+        print(" Command options:")
+        print("   b  : Drop into DLNA Server Browser")
+        print("   q  : Show Play Queue")
+        print("   st : Show Current Status (Snapshot)")
+        print("   m  : Monitor Live Playback Progress")
+        print("   n  : Skip (Next Track)")
+        print("   p  : Previous Track")
+        print("   ps : Pause")
+        print("   pl : Play / Resume")
+        print("   s  : Stop")
+        print("   c  : Clear Queue")
+        print("   h  : Show Help Menu")
+        print("   x  : Exit Controller")
+        print("🎧" * 25)
+
+    def show_status(self):
+        """Fetches and displays a clean status snapshot."""
+        state = self.queue.renderer.get_transport_state()
+        pos_info = self.queue.renderer.get_position_info()
+        
+        print("\n" + "─" * 50)
+        print(f" 🎛️  RENDERER STATUS: {self.queue.renderer.friendly_name} ({self.queue.renderer.host})")
+        print(f" 🚦 Transport State : {state}")
+        print(f" 🎵 Current Track   : {pos_info['title']}")
+        print(f" ⏱️  Playback Time   : {pos_info['position']} / {pos_info['duration']}")
+        print("" + "─" * 50)
+
+    def run_monitor(self):
+        """Loops continuously to show active live progress until user interrupts."""
+        print("\n[+] Entering Live Monitor Mode. Press Ctrl+C to stop monitoring and return to menu.\n")
+        try:
+            while True:
+                state = self.queue.renderer.get_transport_state()
+                pos_info = self.queue.renderer.get_position_info()
+                
+                # Parse strings to display a text progress bar (HH:MM:SS -> seconds)
+                def to_seconds(t_str):
+                    try:
+                        parts = list(map(int, t_str.split(':')))
+                        return parts[0]*3600 + parts[1]*60 + parts[2]
+                    except Exception:
+                        return 0
+
+                cur_sec = to_seconds(pos_info['position'])
+                tot_sec = to_seconds(pos_info['duration'])
+                
+                bar_width = 30
+                if tot_sec > 0:
+                    pct = cur_sec / tot_sec
+                    filled = int(bar_width * pct)
+                else:
+                    pct = 0.0
+                    filled = 0
+                
+                prog_bar = "█" * filled + "░" * (bar_width - filled)
+                
+                print(f"\r [{state}] {pos_info['title'][:25]} |{prog_bar}| {pos_info['position']}/{pos_info['duration']}", end="", flush=True)
+                time.sleep(1.0)
+                
+        except KeyboardInterrupt:
+            print("\n\n[+] Exited Monitor Mode.")
+
     def run(self):
+        # Print help layout strictly on first startup
+        self.print_help()
+        
         while True:
             current = self.queue.get_current_track()
             track_title = current['title'] if current else "None"
             
-            print("\n" + "🎧" * 25)
-            print(f" ACTIVE OUTPUT: {self.queue.renderer.friendly_name}")
-            print(f" CURRENT TRACK: {track_title}")
-            print(" " + "•" * 48)
-            print(" Command options:")
-            print("   b  : Drop into DLNA Server Browser")
-            print("   q  : Show Play Queue")
-            print("   n  : Skip (Next Track)")
-            print("   p  : Previous Track")
-            print("   ps : Pause")
-            print("   pl : Play / Resume")
-            print("   s  : Stop")
-            print("   c  : Clear Queue")
-            print("   x  : Exit Controller")
-            print("🎧" * 25)
-            
-            cmd = input("\nEnter command: ").strip().lower()
+            # Simple, non-intrusive running status header
+            print(f"\n[OUTPUT: {self.queue.renderer.friendly_name} ({self.queue.renderer.host}) | TRACK: {track_title}]")
+            cmd = input("Enter command (or 'h' for help): ").strip().lower()
             
             if cmd == 'b':
                 self.browser.start_ui(self.queue)
             elif cmd == 'q':
                 self.queue.display_queue()
-                input("\nPress Enter to return...")
+            elif cmd == 'st':
+                self.show_status()
+            elif cmd == 'm':
+                self.run_monitor()
             elif cmd == 'n':
                 self.queue.next()
             elif cmd == 'p':
@@ -679,12 +779,14 @@ class Controller:
                 self.queue.stop()
             elif cmd == 'c':
                 self.queue.clear()
+            elif cmd == 'h':
+                self.print_help()
             elif cmd == 'x':
                 print("Shutting down controller...")
                 self.queue.shutdown()
                 break
             else:
-                print("[!] Unknown command.")
+                print("[!] Unknown command. Type 'h' for options.")
 
 
 if __name__ == "__main__":
@@ -692,18 +794,14 @@ if __name__ == "__main__":
     browser = DLNABrowser()
     
     try:
-        # Step 1: Discover / Select Renderer Output
         renderer.select_renderer()
         print("")
         
-        # Step 2: Initialize our Play Queue Engine
         queue = PlayQueue(renderer)
         
-        # Step 3: Discover / Select Media Source Server
         if browser.select_server():
             print(f"[+] Active Control URL: {browser.control_url}\n")
             
-            # Step 4: Pass queue and browser instances into the Controller and begin
             controller = Controller(queue, browser)
             controller.run()
         else:
