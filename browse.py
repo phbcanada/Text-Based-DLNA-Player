@@ -14,8 +14,6 @@ NS_CD = "urn:schemas-upnp-org:service:ContentDirectory:1"
 def discover_dlna_servers(timeout=3):
     """Broadcasts SSDP M-SEARCH to discover DLNA Media Servers on the network."""
     print("[*] Broadcasting SSDP M-SEARCH for Content Directory services...")
-    
-    # Target only UPnP ContentDirectory services (the engine behind DLNA media browsing)
     search_target = "urn:schemas-upnp-org:service:ContentDirectory:1"
     
     ssdp_request = (
@@ -27,7 +25,6 @@ def discover_dlna_servers(timeout=3):
         "\r\n"
     )
 
-    # Set up standard UDP socket for multicast
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.settimeout(timeout)
     
@@ -38,13 +35,11 @@ def discover_dlna_servers(timeout=3):
             try:
                 data, addr = sock.recvfrom(1024)
                 response = data.decode('utf-8', errors='ignore')
-                
-                # Look for the LOCATION header containing the rootDesc.xml URL
                 loc_match = re.search(r'(?i)LOCATION:\s*(http\S+)', response)
                 if loc_match:
                     discovered_urls.add(loc_match.group(1))
             except socket.timeout:
-                break # Timeout reached, stop listening
+                break
     except Exception as e:
         print(f" [!] SSDP Socket error: {e}")
     finally:
@@ -88,9 +83,7 @@ def get_content_directory_url(desc_url):
 
 
 def browse_directory(control_url, object_id="0"):
-    """Sends a SOAP Browse request and safely parses the DIDL-Lite metadata."""
-    print(f"[*] Browsing ObjectID: {object_id}")
-    
+    """Sends a SOAP Browse request and returns a structured list of files/folders."""
     soap_envelope = f"""<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="{NS_SOAP}" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
   <s:Body>
@@ -99,8 +92,7 @@ def browse_directory(control_url, object_id="0"):
       <BrowseFlag>BrowseDirectChildren</BrowseFlag>
       <Filter>*</Filter>
       <StartingIndex>0</StartingIndex>
-      <RequestedCount>30</RequestedCount>
-      <SortCriteria></SortCriteria>
+      <RequestedCount>100</RequestedCount>  <SortCriteria></SortCriteria>
     </u:Browse>
   </s:Body>
 </s:Envelope>"""
@@ -118,11 +110,9 @@ def browse_directory(control_url, object_id="0"):
     result_node = root.find(".//Result")
     
     if result_node is None or not result_node.text:
-        print(" [!] No items found or empty folder.")
         return []
 
     didl_xml_str = result_node.text
-    
     found_items = []
     namespaces = {
         'didl': 'urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/',
@@ -137,7 +127,6 @@ def browse_directory(control_url, object_id="0"):
         for container in didl_root.findall('didl:container', namespaces):
             title = container.find('dc:title', namespaces).text
             cid = container.attrib['id']
-            print(f"  [Folder] Name: '{title}' -> ID: '{cid}'")
             found_items.append({'type': 'folder', 'id': cid, 'title': title})
             
         # Find playable tracks
@@ -148,24 +137,18 @@ def browse_directory(control_url, object_id="0"):
             if res_node is not None:
                 uri = res_node.text
                 mime = res_node.attrib.get('protocolInfo', '').split(':')[2]
-                print(f"  [File]   Title: '{title}'")
-                print(f"           URI:   {uri} ({mime})")
                 found_items.append({'type': 'file', 'id': item_id, 'title': title, 'uri': uri, 'mime': mime})
 
-    except ET.ParseError as e:
-        print(f" [!] XML Parsing failed ({e}). Falling back to robust regex-based extraction...")
+    except ET.ParseError:
+        # Regex Fallback
         containers = re.findall(r'<container id="([^"]+)"[^>]*>.*?<dc:title>([^<]+)</dc:title>', didl_xml_str, re.DOTALL)
         for cid, title in containers:
-            print(f"  [Folder] Name: '{title.strip()}' -> ID: '{cid}'")
             found_items.append({'type': 'folder', 'id': cid, 'title': title.strip()})
 
         items = re.findall(r'<item id="([^"]+)"[^>]*>.*?<dc:title>([^<]+)</dc:title>.*?<res[^>]*>([^<]+)</res>', didl_xml_str, re.DOTALL)
         for item_id, title, uri in items:
             proto_match = re.search(r'protocolInfo="[^"]*:[^"]*:([^"]*):[^"]*"', didl_xml_str)
             mime = proto_match.group(1) if proto_match else "unknown"
-            
-            print(f"  [File]   Title: '{title.strip()}'")
-            print(f"           URI:   {uri.strip()} ({mime})")
             found_items.append({'type': 'file', 'id': item_id, 'title': title.strip(), 'uri': uri.strip(), 'mime': mime})
             
     return found_items
@@ -182,7 +165,6 @@ def select_server():
             return DEFAULT_MINIDLNA_DESC_URL
         return None
 
-    # Retrieve and format friendly names for user presentation
     servers = []
     print("\n[+] Found the following DLNA Servers:")
     for i, url in enumerate(urls, 1):
@@ -190,12 +172,10 @@ def select_server():
         servers.append((name, url))
         print(f"  {i}. {name} ({url})")
 
-    # If only one server exists, auto-select it to save steps
     if len(servers) == 1:
         print(f"\n[*] Only one server found. Automatically selecting: {servers[0][0]}")
         return servers[0][1]
 
-    # Interactive choice loop
     while True:
         try:
             choice = input(f"\nSelect a server (1-{len(servers)}) or type 'exit': ").strip()
@@ -204,9 +184,101 @@ def select_server():
             idx = int(choice) - 1
             if 0 <= idx < len(servers):
                 return servers[idx][1]
-            print("Invalid choice. Please pick a number from the list.")
+            print("Invalid choice.")
         except ValueError:
             print("Please enter a valid integer.")
+
+
+def run_interactive_browser(control_url):
+    """Runs a loop allowing the user to drill down and navigate up directories."""
+    history = []  # List of tuples: (folder_id, folder_title)
+    current_id = "0"
+    current_title = "Root"
+
+    while True:
+        # Draw Breadcrumb Path Header
+        path_str = " ➔ ".join([h[1] for h in history] + [current_title])
+        print("\n" + "=" * 60)
+        print(f" 📂 PATH: {path_str}")
+        print("=" * 60)
+
+        # Fetch contents of current directory
+        try:
+            items = browse_directory(control_url, current_id)
+        except Exception as e:
+            print(f" [!] Failed to browse folder: {e}")
+            if history:
+                print("Returning to previous folder...")
+                current_id, current_title = history.pop()
+                continue
+            else:
+                print("Returning to Root...")
+                current_id, current_title = "0", "Root"
+                continue
+
+        # Prepare Interactive Menu Options
+        menu_items = []
+        option_num = 1
+
+        # Add Back Option if we are deep in the tree
+        if history:
+            print(f"  0. ◀ [..] Go Back up a level")
+            menu_items.append(('back', None))
+
+        if not items:
+            print("     [Folder is empty]")
+        else:
+            for item in items:
+                icon = "📁" if item['type'] == 'folder' else "🎵"
+                print(f"  {option_num}. {icon} {item['title']}")
+                menu_items.append((item['type'], item))
+                option_num += 1
+
+        print("  q. 🛑 Quit Browser")
+        print("-" * 60)
+
+        choice = input("Select an option (number or 'q'): ").strip().lower()
+
+        if choice == 'q':
+            print("\nExiting browser. Goodbye!")
+            break
+
+        try:
+            idx = int(choice)
+            
+            # Route back navigation
+            if history and idx == 0:
+                current_id, current_title = history.pop()
+                continue
+                
+            # If history is present, option '0' was 'back'. 
+            # Our menu_items index aligns with selection index directly if 'back' is element 0.
+            # If history is empty, menu index starts from 1, so index is input - 1.
+            selected_idx = idx if history else idx - 1
+            
+            if selected_idx < 0 or selected_idx >= len(menu_items):
+                print("\n[!] Invalid index selection. Try again.")
+                continue
+
+            item_type, item_data = menu_items[selected_idx]
+
+            if item_type == 'folder':
+                # Push the current directory details to history before entering new directory
+                history.append((current_id, current_title))
+                current_id = item_data['id']
+                current_title = item_data['title']
+                
+            elif item_type == 'file':
+                # Display detailed file metadata
+                print("\n" + "★" * 50)
+                print(f"  Title: {item_data['title']}")
+                print(f"  URI:   {item_data['uri']}")
+                print(f"  Mime:  {item_data['mime']}")
+                print("★" * 50)
+                input("\nPress Enter to return to browsing...")
+
+        except (ValueError, IndexError):
+            print("\n[!] Invalid choice. Please select a valid option from the menu.")
 
 
 if __name__ == "__main__":
@@ -219,15 +291,8 @@ if __name__ == "__main__":
         ctrl_url = get_content_directory_url(target_desc_url)
         print(f"[+] Active Control URL: {ctrl_url}\n")
         
-        # Start browsing from Root ID: "0"
-        current_items = browse_directory(ctrl_url, "0")
-        
-        # Interactive browse loop
-        while True:
-            target_id = input("\nEnter a Folder ID to browse, or 'exit': ").strip()
-            if target_id.lower() == 'exit':
-                break
-            browse_directory(ctrl_url, target_id)
+        # Launch the custom UI loop
+        run_interactive_browser(ctrl_url)
             
     except Exception as e:
-        print(f"\n[!] Error encountered: {e}")
+        print(f"\n[!] Global error: {e}")
