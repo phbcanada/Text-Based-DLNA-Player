@@ -365,6 +365,7 @@ class DLNABrowser:
         self.history = []  
         self.current_id = "0"
         self.current_title = "Root"
+        self.cache = {}
 
     @staticmethod
     def discover_servers(timeout=3):
@@ -474,7 +475,11 @@ class DLNABrowser:
             except ValueError:
                 print("Please enter a valid integer.")
 
-    def browse_directory(self, object_id):
+    def browse_directory(self, object_id, force_refresh=False):
+        # Check cache first
+        if not force_refresh and object_id in self.cache:
+            return self.cache[object_id]
+
         """Sends SOAP Browse request and extracts directory listing."""
         soap_envelope = f"""<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="{self.NS_SOAP}" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
@@ -542,6 +547,7 @@ class DLNABrowser:
                 mime = proto_match.group(1) if proto_match else "unknown"
                 found_items.append({'type': 'file', 'id': item_id, 'title': title.strip(), 'uri': uri.strip(), 'mime': mime})
                 
+        self.cache[object_id] = found_items
         return found_items
 
     def start_ui(self, play_queue):
