@@ -81,23 +81,76 @@ class DLNARenderer:
             pass
         return "Unknown DLNA Renderer"
 
+    def _dump_xml_tree(self, root):
+        print("\n=== DEBUGGING RENDERER ENDPOINTS ===")
+        # UPnP device files group services under <serviceList><service>...</serviceList>
+        for service in root.iter():
+            if 'service' in service.tag and not service.tag.endswith('List'):
+                service_type = ""
+                event_url = ""
+                
+                for child in service:
+                    if 'serviceType' in child.tag:
+                        service_type = child.text
+                    if 'eventSubURL' in child.tag:
+                        event_url = child.text
+                        
+                if "AVTransport" in service_type or "RenderingControl" in service_type:
+                    print(f"Service: {service_type}")
+                    print(f" -> Real eventSubURL: {event_url}")
+        print("============================================\n")
+
     def resolve_control_url(self, desc_url):
-        """Parses description XML to locate the AVTransport control URL."""
+        """Parses description XML to locate the AVTransport control and event URLs."""
         r = requests.get(desc_url, timeout=5)
         r.raise_for_status()
         
         ns = {'upnp': 'urn:schemas-upnp-org:device-1-0'}
         root = ET.fromstring(r.content)
         
+        # =====================================================================
+        # SAFE LOCAL PARSING: Avoid writing to read-only self.host property
+        # =====================================================================
+        from urllib.parse import urlparse
+        parsed_desc = urlparse(desc_url)
+        base_url = f"http://{parsed_desc.netloc}"
+        
+        # Initialize default placeholders using the local base_url string
+        self.avtransport_event_url = f"{base_url}/upnp/event/rendertransport1"
+        self.rendering_control_event_url = f"{base_url}/upnp/event/rendercontrol1"
+        
+        avtransport_found = False
+
         for service in root.findall('.//upnp:service', ns):
-            service_type = service.find('upnp:serviceType', ns).text
+            s_type_node = service.find('upnp:serviceType', ns)
+            if s_type_node is None:
+                continue
+                
+            service_type = s_type_node.text
+            
+            event_path_node = service.find('upnp:eventSubURL', ns)
+            if event_path_node is not None and event_path_node.text:
+                event_url = event_path_node.text
+                if not event_url.startswith("http"):
+                    event_url = f"{base_url}/{event_url.lstrip('/')}"
+                
+                if "AVTransport" in service_type:
+                    self.avtransport_event_url = event_url
+                    print(f"[+] Found AVTransport Event URL: {event_url}")
+                elif "RenderingControl" in service_type:
+                    self.rendering_control_event_url = event_url
+                    print(f"[+] Found RenderingControl Event URL: {event_url}")
+
             if "AVTransport:1" in service_type:
                 control_path = service.find('upnp:controlURL', ns).text
                 self.desc_url = desc_url
                 self.control_url = urljoin(desc_url, control_path)
                 self.friendly_name = self.get_friendly_name(desc_url)
-                return self.control_url
-                
+                avtransport_found = True
+
+        if avtransport_found:
+            return self.control_url
+            
         raise Exception("AVTransport service not found on this device.")
 
     def select_renderer(self):

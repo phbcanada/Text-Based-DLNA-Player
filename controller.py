@@ -12,18 +12,19 @@ class Controller:
         print(f" ACTIVE OUTPUT: {self.queue.renderer.friendly_name} ({self.queue.renderer.host})")
         print(" " + "•" * 48)
         print(" Command options:")
-        print("   b  : Browse Media")
-        print("   q  : Show Play Queue")
-        print("   st : Show Current Status (Snapshot)")
-        print("   m  : Monitor Live Playback Progress")
-        print("   n  : Skip (Next Track)")
-        print("   p  : Previous Track")
-        print("   ps : Pause")
-        print("   pl : Play / Resume")
-        print("   s  : Stop")
+        print("   b : Browse Media")
+        print("   q : Show Play Queue")
+        print("   s : Show Current Status (Snapshot)")
+        print("   m : Monitor Live Playback Progress")
+        print("   + : Skip (Next Track)")
+        print("   - : Previous Track")
+        print("   p : Play / Pause")
+        print("   x  : Stop")
         print("   c  : Clear Queue")
+        print("   S  : Save Playlist")
+        print("   L  : Load Playlist")
         print("   h  : Show Help Menu")
-        print("   x  : Exit Controller")
+        print("   Q  : Exit Controller")
         print("🎧" * 25)
 
     def show_status(self):
@@ -74,6 +75,8 @@ class Controller:
             print("\n\n[+] Exited Monitor Mode.")
 
     def run(self):
+        self.queue.start_monitoring()
+
         # Print help layout strictly on first startup
         self.print_help()
         
@@ -83,31 +86,41 @@ class Controller:
             
             # Simple, non-intrusive running status header
             # print(f"\n[OUTPUT: {self.queue.renderer.friendly_name} ({self.queue.renderer.host}) | TRACK: {track_title}]")
-            cmd = input("Enter command (or 'h' for help): ").strip().lower()
+            cmd = input("Enter command (or 'h' for help): ").strip()
             
             if cmd == 'b':
                 self.browser.start_ui(self.queue)
             elif cmd == 'q':
                 self.queue.display_queue()
-            elif cmd == 'st':
+            elif cmd == 's' or len(cmd) == 0:
                 self.show_status()
             elif cmd == 'm':
                 self.run_monitor()
-            elif cmd == 'n':
+            elif cmd == '+':
                 self.queue.next()
-            elif cmd == 'p':
+            elif cmd == '-':
                 self.queue.prev()
-            elif cmd == 'ps':
-                self.queue.pause()
-            elif cmd == 'pl':
-                self.queue.play()
-            elif cmd == 's':
+            elif cmd == 'p':
+                self.queue.toggle_play()
+            elif cmd == 'x':
                 self.queue.stop()
             elif cmd == 'c':
                 self.queue.clear()
             elif cmd == 'h':
                 self.print_help()
-            elif cmd == 'x':
+            elif cmd == 'S':  # Save Playlist command option
+                name = input("Enter playlist name: ").strip()
+                if len(name) > 0:
+                    self.queue.save_playlist(name)
+                else:
+                    print("Nothing saved.")
+            elif cmd == 'L':  # Load Playlist command option
+                name = input("Enter playlist name to load: ").strip()
+                if len(name) > 0:
+                    self.queue.load_playlist(name)
+                else:
+                    print("Load canceled.")
+            elif cmd == 'Q':
                 print("Shutting down controller...")
                 self.queue.shutdown()
                 break
